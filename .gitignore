@@ -1,7 +1,6 @@
 *.w2v
-*.csv
 *.txt
 __pycache__
 .ipynb_checkpoints
-test_trainer/
 stopwords-it
+test_trainer

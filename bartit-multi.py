@@ -52,44 +52,58 @@ class MultiTaskModel(nn.Module):
 
 from transformers import Trainer
 
-class MultiTaskTrainer(Trainer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.loss_categ = nn.CrossEntropyLoss()
-        self.loss_binary = nn.BCEWithLogitsLoss()
+# class MultiTaskTrainer(Trainer):
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
+#         self.loss_categ = nn.CrossEntropyLoss()
+#         self.loss_binary = nn.BCEWithLogitsLoss()
         
-    def compute_loss(self, model, inputs, return_outputs=False):
-        # implement custom logic here
-        output = model(inputs["input_ids"], inputs["attention_mask"])
+#     def compute_loss(self, model, inputs, return_outputs=False):
+#         # implement custom logic here
+#         output = model(inputs["input_ids"], inputs["attention_mask"])
         
-        zero_cat = (inputs["labels"][:, 0] == 0) | (inputs["labels"][:, 1] == 4)
+#         zero_cat = (inputs["labels"][:, 0] == 0) | (inputs["labels"][:, 1] == 4)
 
-        loss_bin = self.loss_binary(output.get("logits")[:, 0], inputs["labels"][:, 0].float())
-        loss_cat = self.loss_categ(output.get("logits")[~zero_cat, 1:], inputs["labels"][~zero_cat, 1])
+#         loss_bin = self.loss_binary(output.get("logits")[:, 0], inputs["labels"][:, 0].float())
+#         loss_cat = self.loss_categ(output.get("logits")[~zero_cat, 1:], inputs["labels"][~zero_cat, 1])
 
-        lmbda = 1.
-        loss = loss_bin + lmbda * loss_cat
+#         lmbda = 1.
+#         loss = loss_bin + lmbda * loss_cat
         
-        if return_outputs:
-            return loss, output
-        return loss
+#         if return_outputs:
+#             return loss, output
+#         return loss
 
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+from sklearn.metrics import roc_curve, f1_score
 def compute_metrics(eval_pred):
     logits = eval_pred.predictions
     labels = eval_pred.label_ids
 
     meaningful_categ = labels[:, 1] != 4
-
-
-    bin_pres = logits[~meaningful_categ, 0] > 0.5
-    categ_preds = np.argmax(logits[meaningful_categ, 1:], axis=-1)
-
+    
     bin_labels = labels[~meaningful_categ, 0]
     categ_labels = labels[meaningful_categ, 1]
+    
+    fpr, tpr, thresh = roc_curve(labels[:,0], sigmoid(logits[:, 0]))
+    best_thresh = thresh[((1-tpr)**2 + fpr**2).argmin()]
+    
+    bin_pres = sigmoid(logits[:, 0]) > best_thresh
+    categ_preds = np.argmax(logits[meaningful_categ, 1:], axis=-1)
+    
+    # f1A = f1.compute(predictions=bin_pres, references=bin_labels, average="macro")["f1"]
+    # f1B = f1.compute(predictions=categ_preds, references=categ_labels, average="macro")["f1"]
+    f1A = f1_score(labels[:,0], bin_pres, average="macro")
+    f1B = f1_score(categ_labels, categ_preds, average="macro")
+    f1_overall = .6 * f1A + .4 * f1B
 
     return {
-        "f1_A": f1.compute(predictions=bin_pres, references=bin_labels, average="macro"),
-        "f1_B": f1.compute(predictions=categ_preds, references=categ_labels, average="macro")
+        "f1_A": f1A,
+        "f1_B": f1B,
+        "f1": f1_overall,
+        "thresh": best_thresh,
     }
 
 def build_tokenizer_func(tokenizer):
@@ -108,10 +122,16 @@ def load_data_for_task(tokenizer, load_val=False):
     df_A["labels_categ"] = 4
     df_B["labels_binary"] = 1
 
-    df = pd.concat([df_A, df_B], axis=0).sample(frac=1., replace=False, random_state=42)
+    # df = pd.concat([df_A, df_B], axis=0).sample(frac=1., replace=False, random_state=42)
+    df = df_A.merge(df_B, on="text", how="outer").sample(frac=1., replace=False, random_state=42)
+    
+    df["labels_binary"] = ((df["labels_binary_x"] == 1) | (df["labels_binary_y"] == 1)).astype(int)
+    df["labels_categ"] = df["labels_categ_y"].map(lambda x: 4 if np.isnan(x) else x).astype(int)
+    
 
     df["labels"] = df.apply(lambda x: [x["labels_binary"], x["labels_categ"]], axis=1)
-    df.drop(columns=["labels_binary", "labels_categ"], inplace=True)
+    # df.drop(columns=["labels_binary", "labels_categ"], inplace=True)
+    df = df[["text", "labels"]]
     
     if load_val:
         df_train, df_val = train_test_split(df, train_size=.8)
@@ -132,11 +152,12 @@ def load_data_for_task(tokenizer, load_val=False):
 
 import torch
 
-n_epochs = 7
+n_epochs = 15
 
-encoder = AutoModel.from_pretrained("morenolq/bart-it")
+model_name = "morenolq/bart-it-fanpage"
+encoder = AutoModel.from_pretrained(model_name)
 model = MultiTaskModel(encoder=encoder)
-tokenizer = AutoTokenizer.from_pretrained("morenolq/bart-it")
+tokenizer = AutoTokenizer.from_pretrained(model_name)
 ds_train, ds_val, ds_test = load_data_for_task(tokenizer, load_val=True)
 
 tok_func = build_tokenizer_func(tokenizer)
@@ -163,6 +184,7 @@ trainer.train()
 
 with torch.no_grad():
     model.eval()
+
     pred = model(torch.tensor(ds_test_tok["input_ids"]).to("cuda:0"), torch.tensor(ds_test_tok["attention_mask"]).to("cuda:0"))
     model.train()
     # y_pred = pred.logits.argmax(axis=1).cpu().detach().numpy()

@@ -2,5 +2,4 @@
 *.txt
 __pycache__
 .ipynb_checkpoints
-stopwords-it
 test_trainer

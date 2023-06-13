@@ -1,0 +1,3 @@
+[submodule "stopwords-it"]
+	path = stopwords-it
+	url = git@github.com:stopwords-iso/stopwords-it.git
